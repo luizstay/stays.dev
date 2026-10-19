@@ -151,6 +151,40 @@ function handleAssistantMessageCatchUp(
   if (!content) return;
   const sanitizedContent = sanitizeText(content);
   const deltasSoFar = state.assistantContent.slice(state.msgIdDeltaStart);
+  // A completed message without tool requests is the answer, even after tools.
+  // Parse it independently: cumulative thinking includes earlier assistant turns.
+  if (Array.isArray(evtData?.toolRequests) && evtData.toolRequests.length === 0) {
+    const finalRouter = new ChannelTokenRouter();
+    const visibleText = [...finalRouter.process(content), ...finalRouter.flush()]
+      .filter((chunk) => chunk.type === "text")
+      .map((chunk) => sanitizeText(chunk.content)).join("");
+    if (visibleText.startsWith(deltasSoFar)) {
+      const missing = visibleText.slice(deltasSoFar.length);
+      const buffered = state.leadingTextBuffer;
+      const reclassified = buffered && visibleText.startsWith(buffered) ? buffered
+        : visibleText && buffered.includes(visibleText) ? visibleText : "";
+      const thinkingIndex = reclassified ? state.assistantThinking.lastIndexOf(reclassified) : -1;
+      if (thinkingIndex >= 0) {
+        state.assistantThinking = state.assistantThinking.slice(0, thinkingIndex)
+          + state.assistantThinking.slice(thinkingIndex + reclassified.length);
+      }
+      channelRouter.flush(); // The complete message already includes any held marker suffix.
+      state.leadingTextBuffer = "";
+      state.leadingTextFlushed = true;
+      if (missing) {
+        state.assistantContent += missing;
+        const promoted = reclassified && missing.startsWith(reclassified) ? reclassified : "";
+        if (promoted) stream.writeSSE({ data: JSON.stringify({ type: "thinking_to_text", data: promoted }) }).catch(() => {});
+        const suffix = missing.slice(promoted.length);
+        if (suffix) stream.writeSSE({ data: JSON.stringify({ type: "text_delta", data: suffix }) }).catch(() => {});
+        broadcastToRoom(projectId, { type: "ai:stream-chunk", chunk: missing, messageId, isThinking: false }, userId).catch(() => {});
+        state.traceCollector?.onTextDelta(missing);
+        state.lastSseEmitAt = Date.now();
+        state.sseFrameCount++;
+      }
+    }
+    return;
+  }
   // Account for text we classified as thinking via the leading-text buffer.
   // The SDK's assistant.message includes ALL text (reasoning + content), but
   // our delta handler split it into assistantContent and assistantThinking.
