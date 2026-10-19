@@ -35,7 +35,10 @@ COPY packages/shared/package.json packages/shared/
 COPY packages/docore/package.json packages/docore/
 COPY packages/dovault/package.json packages/dovault/
 COPY packages/doable-sdk/package.json packages/doable-sdk/
+COPY packages/doable-ai/package.json packages/doable-ai/
+COPY packages/doable-data/package.json packages/doable-data/
 COPY packages/marketplace-bundle/package.json packages/marketplace-bundle/
+COPY mcp-servers/image-generator/package.json mcp-servers/image-generator/
 COPY mcp-servers/markdown-builder/package.json mcp-servers/markdown-builder/
 COPY mcp-servers/pdf-builder/package.json mcp-servers/pdf-builder/
 COPY mcp-servers/presentation-builder/package.json mcp-servers/presentation-builder/

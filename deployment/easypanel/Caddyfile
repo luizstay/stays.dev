@@ -1,0 +1,118 @@
+{
+    admin off
+    auto_https off
+}
+
+:80 {
+        # ─── OTLP browser tracing exporter → Next.js proxy (web container) ──
+        # apps/web/src/app/api/otlp/[...path]/route.ts forwards to the api
+        # container's /internal/otlp/* receiver. MUST come before the
+        # generic /api/* matcher so longest-prefix wins.
+        handle /api/otlp/* {
+                reverse_proxy web:3000
+        }
+
+        # ─── API server (Hono) → strip /api/ prefix ─────────────────────────
+        # Mirrors nginx's `location /api/ { proxy_pass http://api:4000/; }`
+        # behavior: incoming /api/projects → forwarded as /projects.
+        handle_path /api/* {
+                reverse_proxy api:4000
+        }
+
+        # ─── Auth FRONTEND pages (Next.js client routes) ───────────────────
+        # /auth/callback and /auth/refresh are CLIENT-SIDE React pages
+        # (apps/web/src/app/auth/{callback,refresh}/page.tsx) — they parse
+        # OAuth fragments and perform token refresh in the browser. Without
+        # this explicit web routing, the wildcard /auth/* below would steal
+        # them and proxy to the api, which has no /auth/callback route and
+        # returns "Missing or invalid Authorization header" — leaving OAuth
+        # users stuck on a raw-JSON error page after Google/GitHub sign-in.
+        @auth_web path /auth/callback /auth/callback/* /auth/refresh
+        handle @auth_web {
+                reverse_proxy web:3000
+        }
+
+        # ─── Auth API routes (preserve path) ────────────────────────────────
+        # api server handles /auth/* directly, no prefix strip needed.
+        # External OAuth providers (Google, GitHub) POST their callbacks to
+        # /auth/google/callback + /auth/github/callback on the configured
+        # redirect_uri host, which is why this route preserves the path
+        # rather than going via /api/*.
+        handle /auth/* {
+                reverse_proxy api:4000
+        }
+
+        # ─── Consolidated GitHub OAuth callbacks ────────────────────────────
+        # api server registers /oauth/github/{login,copilot,repo}/callback so
+        # a single GitHub OAuth App with parent callback URL
+        # https://${DOABLE_SITE}/oauth/github/ covers every flow. Without
+        # this route the catch-all below would forward to web (404).
+        handle /oauth/* {
+                reverse_proxy api:4000
+        }
+
+        # ─── Preview iframes for AI-built apps ──────────────────────────────
+        # api spawns per-project vite dev servers and proxies /preview/<id>/
+        # to them, preserving paths so vite's relative URLs resolve.
+        # Long timeouts for SSE / HMR.
+        handle /preview/* {
+                reverse_proxy api:4000 {
+                        transport http {
+                                read_timeout 24h
+                                write_timeout 24h
+                        }
+                }
+        }
+
+        # ─── Per-app DB + connector-proxy surface (api) ────────────────────
+        # AI-generated previews call origin-relative /__doable/data/* (the
+        # @doable/data SDK) and /__doable/connector-proxy/* (the connector
+        # bridge). Without this route they fall through to the catch-all and
+        # hit the Next.js frontend, which returns HTML — the @doable/data
+        # client's res.json() then throws "Unexpected token '<'" and NO data
+        # is ever persisted. Path is preserved (the api serves /__doable/*).
+        handle /__doable/* {
+                reverse_proxy api:4000
+        }
+
+        # ─── WebSocket (Yjs CRDT collab + AI trace stream) ──────────────────
+        @ws path /ws /ws/* /socket /socket/*
+        handle @ws {
+                reverse_proxy ws:4001
+        }
+
+        # ─── Published static sites (path publish topology) ─────────────────
+        # The doable-path deploy adapter writes built SPAs to the shared
+        # doable_sites volume, mounted read-only here at /srv/sites/<slug>/.
+        # We serve them at https://${DOABLE_SITE}/sites/<slug>/ so publishing
+        # works out-of-the-box on a single domain (no wildcard DNS, no tunnel,
+        # one cert). The subdomain topology bypasses this entirely.
+        #
+        # Canonicalise the bare site root to a trailing slash so the SPA's
+        # absolute base href (/sites/<slug>/) lines up.
+        @published_noslash path_regexp ^/sites/[^/]+$
+        redir @published_noslash {http.request.uri.path}/ 308
+
+        # Serve <slug>/<asset> from /srv/sites, falling back to the per-site
+        # index.html so client-side routes (deep links) resolve. The named
+        # capture is evaluated because the matcher gates the handle block.
+        @published path_regexp pub ^/sites/(?P<slug>[^/]+)/
+        handle @published {
+                root * /srv/sites
+                uri strip_prefix /sites
+                try_files {path} /{re.pub.slug}/index.html
+                file_server
+        }
+
+        # ─── Frontend (Next.js) catch-all ────────────────────────────────────
+        handle {
+                reverse_proxy web:3000
+        }
+
+        # ─── Defense-in-depth header (app emits the rest) ────────────────────
+        # Most security headers (CSP, HSTS, X-Frame-Options, Permissions-Policy)
+        # come from apps/web/src/middleware.ts + the Hono api. We layer just
+        # one defense-in-depth header here — the one Caddy can reliably set
+        # on static-asset 404s served before reaching the app.
+        header X-Content-Type-Options nosniff
+}
