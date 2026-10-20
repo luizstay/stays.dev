@@ -83,6 +83,11 @@
                 reverse_proxy api:4000
         }
 
+        # The consolidated repo callback redirects here; keep it on the API.
+        handle /github/repo/callback {
+                reverse_proxy api:4000
+        }
+
         # ─── Preview iframes for AI-built apps ──────────────────────────────
         # api spawns per-project vite dev servers and proxies /preview/<id>/
         # to them, preserving paths so vite's relative URLs resolve.
